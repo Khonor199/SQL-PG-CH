@@ -1,0 +1,75 @@
+-- Сравнение цены предложения поставщиков и сравнение её с конкурентами для переговоров
+
+WITH a AS (    
+    WITH pars AS (
+        SELECT model_id, LEAST(price, price2) as least_price, source
+        FROM prod.price_parsing
+        WHERE date = (
+            SELECT max(date)
+            FROM prod.price_parsing
+        )
+    ),
+    filtered_pars AS (
+        SELECT pars.model_id, pars.least_price, pars.source
+        FROM pars
+        WHERE (pars.model_id, pars.least_price) IN (
+            SELECT model_id, MIN(least_price)
+            FROM pars
+            GROUP BY model_id
+        )
+
+    )
+    
+    SELECT DISTINCT filtered_pars.model_id, MIN(filtered_pars.least_price) as least, filtered_pars.source
+    FROM filtered_pars
+    GROUP BY filtered_pars.model_id, filtered_pars.source
+    ORDER BY filtered_pars.model_id
+),
+offer AS (
+    SELECT offer_id, model_id, brand_id, category_id, supplier_id, price
+    FROM prod.price_snapshot
+    WHERE date = today() - 1
+),
+average AS (
+    SELECT AVG((price+price2)/2) as price, model_id
+    FROM prod.price_parsing
+    WHERE date = (
+        SELECT max(date)
+        FROM prod.price_parsing
+        )
+    GROUP BY model_id
+)
+
+SELECT
+    offer.offer_id AS offer_id,
+    dictGet('default.pim_offer_offer_dict', 'name', offer.offer_id) as offer_name,
+    offer.model_id AS model_id,
+    dictGet('default.pim_catalog_model_dict', 'name', offer.model_id) as modeL_name,
+    CONCAT('https://maksmart.ru/product/', toString(offer.model_id), '/') AS model_link,
+    offer.brand_id AS brand_id,
+    offer.category_id AS category_id,
+    
+    --dictGet('default.pim_catalog_nodes', 'name', offer.category_id) as category_1,
+    --dictGet('default.pim_catalog_nodes', 'group_name', offer.category_id) as category_2,
+    --dictGet('default.pim_catalog_nodes', 'full_name', offer.category_id) as category_3,
+    
+    dictGet('default.pim_catalog_category_dict', 'name', offer.category_id) as category_name,
+    dictGet('default.pim_catalog_category_dict', 'top_name', offer.category_id) as top_category_name,
+    offer.supplier_id AS supplier_id,
+    dictGet('default.supplier_service_supplier_dict', 'name', offer.supplier_id) as supplier_name,
+    dictGet('default.supplier_service_supplier_dict', 'manager_email', offer.supplier_id) as manager_email,
+    offer.price AS offer_price,
+    (offer.price / average.price - 1) * 100 AS "Оффер к средней цене, %",
+    average.price AS average_parsing_price,
+    a.least AS min_parsing_price,
+    a.source AS min_price_source,
+    CASE WHEN a.least < offer.price THEN 1 ELSE 0 END AS "Оффер выше минимальной цены",
+    CASE WHEN average.price < offer.price THEN 1 ELSE 0 END AS "Оффер выше средней цены",
+    SUM("Оффер выше средней цены") OVER (PARTITION BY offer.model_id)/COUNT(*) OVER (PARTITION BY offer.model_id)*100 as "First_Priority, %",
+    SUM("Оффер выше минимальной цены") OVER (PARTITION BY offer.model_id)/COUNT(*) OVER (PARTITION BY offer.model_id)*100 as "Second_Priority, %"
+
+FROM offer
+LEFT JOIN a ON offer.model_id = a.model_id
+LEFT JOIN average ON offer.model_id = average.model_id
+WHERE a.least > 0
+ORDER BY "First_Priority, %" DESC, offer.model_id, offer.price
